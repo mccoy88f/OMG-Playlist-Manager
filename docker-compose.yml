@@ -2,15 +2,22 @@ version: '3.8'
 
 services:
   backend:
-    build: ./backend
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: omg-playlist-backend
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app
-      - ./data:/data
+      - type: bind
+        source: ./backend
+        target: /app
+      - type: bind
+        source: ./data
+        target: /data
     environment:
       - CORS_ORIGINS=http://localhost:80
+      - PYTHONPATH=/app
     healthcheck:
       test: curl --fail http://localhost:8000 || exit 1
       interval: 10s
