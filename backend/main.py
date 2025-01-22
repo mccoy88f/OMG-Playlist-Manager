@@ -277,6 +277,62 @@ async def get_public_playlist(token: str):
         
         return PlainTextResponse(content)
 
+@app.post("/playlists/{playlist_id}/channels")
+async def add_channel(playlist_id: int, channel: ChannelCreate):
+    with get_db() as db:
+        cursor = db.cursor()
+        
+        # Verifica che la playlist esista
+        playlist = cursor.execute(
+            "SELECT * FROM playlists WHERE id = ?",
+            (playlist_id,)
+        ).fetchone()
+        
+        if not playlist:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+            
+        try:
+            # Trova la posizione massima attuale
+            max_pos = cursor.execute(
+                """
+                SELECT MAX(position) as max_pos 
+                FROM channels 
+                WHERE playlist_id = ?
+                """,
+                (playlist_id,)
+            ).fetchone()
+            
+            next_pos = (max_pos['max_pos'] or 0) + 1 if max_pos else 1
+            
+            # Inserisci il nuovo canale
+            cursor.execute(
+                """
+                INSERT INTO channels 
+                (playlist_id, name, url, group_title, logo_url, position, tvg_id, extra_tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (playlist_id, channel.name, channel.url, 
+                 channel.group_title, channel.logo_url, next_pos,
+                 channel.tvg_id, channel.extra_tags)
+            )
+            
+            # Recupera il canale appena inserito
+            new_channel = cursor.execute(
+                "SELECT * FROM channels WHERE id = ?",
+                (cursor.lastrowid,)
+            ).fetchone()
+            
+            return dict(new_channel)
+            
+        except Exception as e:
+            print(f"Error adding channel: {str(e)}")  # Debug log
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to add channel: {str(e)}"
+            )
+
+@app.put("/channels/{channel_id}/tvg-id")
+
 @app.post("/playlists/{playlist_id}/add-channel/{channel_id}")
 async def add_channel_to_playlist(playlist_id: int, channel_id: int):
     with get_db() as db:
