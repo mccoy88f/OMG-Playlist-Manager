@@ -1,15 +1,30 @@
 import sqlite3
 from sqlite3 import Connection
+import json
 from typing import Optional
 from pathlib import Path
 
 DATABASE_PATH = Path("data/playlists.db")
 
+def dict_factory(cursor, row):
+    fields = [column[0] for column in cursor.description]
+    return {key: value for key, value in zip(fields, row)}
+
+def adapt_dict(d):
+    return json.dumps(d)
+
+def convert_dict(s):
+    return json.loads(s)
+
+# Registra gli adattatori per JSON
+sqlite3.register_adapter(dict, adapt_dict)
+sqlite3.register_converter("JSON", convert_dict)
+
 def get_db() -> Connection:
     """Create a database connection and return it"""
     DATABASE_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(str(DATABASE_PATH))
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(str(DATABASE_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
+    conn.row_factory = dict_factory
     return conn
 
 def init_db():
@@ -24,6 +39,8 @@ def init_db():
             name TEXT NOT NULL,
             url TEXT,
             is_custom BOOLEAN DEFAULT FALSE,
+            public_token TEXT UNIQUE,
+            epg_url TEXT,
             last_sync TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -38,6 +55,9 @@ def init_db():
             url TEXT NOT NULL,
             group_title TEXT,
             logo_url TEXT,
+            tvg_id TEXT,
+            position INTEGER,
+            extra_tags JSON,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (playlist_id) REFERENCES playlists (id) ON DELETE CASCADE
         )
@@ -54,6 +74,24 @@ def init_db():
             FOREIGN KEY (channel_id) REFERENCES channels (id) ON DELETE CASCADE
         )
     """)
+
+    # Se il campo position non esiste, aggiungilo
+    try:
+        cursor.execute("ALTER TABLE channels ADD COLUMN position INTEGER;")
+    except sqlite3.OperationalError:
+        pass  # Il campo esiste già
+
+    # Se il campo tvg_id non esiste, aggiungilo
+    try:
+        cursor.execute("ALTER TABLE channels ADD COLUMN tvg_id TEXT;")
+    except sqlite3.OperationalError:
+        pass  # Il campo esiste già
+
+    # Se il campo epg_url non esiste, aggiungilo
+    try:
+        cursor.execute("ALTER TABLE playlists ADD COLUMN epg_url TEXT;")
+    except sqlite3.OperationalError:
+        pass  # Il campo esiste già
 
     conn.commit()
     conn.close()
