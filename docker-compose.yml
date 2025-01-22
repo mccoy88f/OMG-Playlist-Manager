@@ -11,7 +11,7 @@ services:
     environment:
       - CORS_ORIGINS=http://localhost:80
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"] || exit 1
+      test: curl --fail http://localhost:8000/docs || exit 1
       interval: 10s
       timeout: 5s
       retries: 5
