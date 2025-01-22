@@ -148,6 +148,8 @@ async def delete_playlist(playlist_id: int):
 
 @app.post("/playlists/{playlist_id}/sync")
 async def sync_playlist(playlist_id: int):
+    print(f"Starting sync for playlist {playlist_id}")  # Debug log
+    
     with get_db() as db:
         cursor = db.cursor()
         
@@ -156,6 +158,8 @@ async def sync_playlist(playlist_id: int):
             (playlist_id,)
         ).fetchone()
         
+        print(f"Found playlist: {playlist}")  # Debug log
+        
         if not playlist:
             raise HTTPException(status_code=404, detail="Playlist not found")
         
@@ -163,10 +167,28 @@ async def sync_playlist(playlist_id: int):
             raise HTTPException(status_code=400, detail="Playlist has no URL")
         
         try:
+            print(f"Fetching URL: {playlist['url']}")  # Debug log
             async with aiohttp.ClientSession() as session:
                 async with session.get(playlist['url']) as response:
+                    if response.status != 200:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Failed to fetch playlist: HTTP {response.status}"
+                        )
+                        
                     content = await response.text()
-                    channels = parse_m3u(content)
+                    print(f"Received content length: {len(content)}")  # Debug log
+                    print(f"First 200 chars: {content[:200]}")  # Debug log
+                    
+                    try:
+                        channels = parse_m3u(content)
+                        print(f"Parsed {len(channels)} channels")  # Debug log
+                    except Exception as e:
+                        print(f"Error parsing M3U: {str(e)}")  # Debug log
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Failed to parse M3U content: {str(e)}"
+                        )
                     
                     # Mantieni i tvg_id esistenti
                     existing_channels = {
@@ -175,46 +197,67 @@ async def sync_playlist(playlist_id: int):
                             "SELECT url, tvg_id FROM channels WHERE playlist_id = ?",
                             (playlist_id,)
                         ).fetchall()
+                        if ch['tvg_id']  # Solo se tvg_id non è None
                     }
                     
-                    # Clear existing channels
-                    cursor.execute(
-                        "DELETE FROM channels WHERE playlist_id = ?",
-                        (playlist_id,)
-                    )
-                    
-                    # Insert new channels
-                    for channel in channels:
-                        # Se il canale esisteva già, mantieni il suo tvg_id
-                        tvg_id = existing_channels.get(channel.url, channel.tvg_id)
+                    try:
+                        print("Starting database transaction")  # Debug log
+                        cursor.execute("BEGIN TRANSACTION")
                         
+                        # Clear existing channels
+                        cursor.execute(
+                            "DELETE FROM channels WHERE playlist_id = ?",
+                            (playlist_id,)
+                        )
+                        print("Deleted existing channels")  # Debug log
+                        
+                        # Insert new channels
+                        for i, channel in enumerate(channels):
+                            try:
+                                # Se il canale esisteva già, mantieni il suo tvg_id
+                                tvg_id = existing_channels.get(channel.url, channel.tvg_id)
+                                
+                                cursor.execute(
+                                    """
+                                    INSERT INTO channels 
+                                    (playlist_id, name, url, group_title, logo_url, tvg_id, position, extra_tags)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (playlist_id, channel.name, channel.url, channel.group, 
+                                     channel.logo, tvg_id, i+1, json.dumps(channel.extra_tags))
+                                )
+                            except Exception as e:
+                                print(f"Error inserting channel {i}: {str(e)}")  # Debug log
+                                print(f"Channel data: {channel.to_dict()}")  # Debug log
+                                raise
+                        
+                        print(f"Inserted {len(channels)} new channels")  # Debug log
+                        
+                        # Update last_sync
                         cursor.execute(
                             """
-                            INSERT INTO channels 
-                            (playlist_id, name, url, group_title, logo_url, tvg_id, position, extra_tags)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            UPDATE playlists 
+                            SET last_sync = CURRENT_TIMESTAMP
+                            WHERE id = ?
                             """,
-                            (playlist_id, channel.name, channel.url, channel.group, 
-                             channel.logo, tvg_id, channel.position, channel.extra_tags)
+                            (playlist_id,)
+                        )
+                        
+                        cursor.execute("COMMIT")
+                        print("Transaction committed successfully")  # Debug log
+                        
+                    except Exception as e:
+                        print(f"Database error: {str(e)}")  # Debug log
+                        cursor.execute("ROLLBACK")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Database error during sync: {str(e)}"
                         )
                     
-                    # Update last_sync
-                    cursor.execute(
-                        """
-                        UPDATE playlists 
-                        SET last_sync = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                        """,
-                        (playlist_id,)
-                    )
-                    
-            return {"message": "Playlist synchronized successfully"}
-            
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error syncing playlist: {str(e)}"
-            )
+            return {
+                "message": "Playlist synchronized successfully",
+                "channels_count": len(channels)
+            }
 
 @app.post("/playlists/{playlist_id}/generate-token")
 async def generate_public_token(playlist_id: int):
