@@ -15,6 +15,10 @@ from m3u_utils import parse_m3u, generate_m3u, M3UChannel
 
 app = FastAPI(title="OMG Playlist Manager")
 
+@app.get("/")
+async def read_root():
+    return {"status": "healthy"}
+
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
