@@ -1,22 +1,28 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import Layout from './components/Layout.jsx';
-import Home from './pages/Home.jsx';
-import AddPlaylist from './pages/AddPlaylist.jsx';
-import PlaylistDetail from './pages/PlaylistDetail.jsx';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { Layout } from '@/components/layout';
+import { AuthGuard, RequireAuth } from '@/components/auth';
+import { LoginPage } from '@/pages/Login';
+// Importa altre pagine qui...
 
-function App() {
+export default function App() {
   return (
-    <Router>
-      <Layout>
+    <BrowserRouter>
+      <AuthGuard>
         <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/add" element={<AddPlaylist />} />
-          <Route path="/playlist/:id" element={<PlaylistDetail />} />
+          {/* Public routes */}
+          <Route path="/login" element={<LoginPage />} />
+          
+          {/* Protected routes */}
+          <Route element={<RequireAuth><Layout /></RequireAuth>}>
+            <Route index element={<Navigate to="/playlists" replace />} />
+            {/* Add other protected routes here... */}
+          </Route>
+          
+          {/* Catch all */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-      </Layout>
-    </Router>
+      </AuthGuard>
+    </BrowserRouter>
   );
 }
-
-export default App;
