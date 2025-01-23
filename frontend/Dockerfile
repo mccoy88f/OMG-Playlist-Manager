@@ -1,15 +1,13 @@
 # Build stage
-FROM node:20-slim as build
+FROM node:20-slim AS build
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
-
 # Install dependencies
-RUN npm install
+COPY package*.json ./
+RUN npm ci
 
-# Copy all source files
+# Copy source code
 COPY . .
 
 # Build the application
@@ -24,6 +22,7 @@ COPY --from=build /app/dist /usr/share/nginx/html
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
+# Expose port
 EXPOSE 80
 
 CMD ["nginx", "-g", "daemon off;"]
