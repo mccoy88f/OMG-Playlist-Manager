@@ -1,19 +1,28 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Dict
 import aiohttp
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
+import json
 import sqlite3
 
 from database import get_db, init_db
 from models import (
+    Token, User, UserCreate,
     PlaylistCreate, PlaylistUpdate, Playlist,
-    ChannelCreate, ChannelUpdate, Channel
+    ChannelCreate, ChannelUpdate, Channel,
+    ChannelOrder, CustomPlaylistChannelAdd
 )
 from m3u_utils import parse_m3u, generate_m3u, M3UChannel
+from auth import (
+    authenticate_user, create_access_token, 
+    get_current_user, get_current_user_id,
+    ACCESS_TOKEN_EXPIRE_MINUTES
+)
 
 app = FastAPI(title="OMG Playlist Manager")
 
@@ -21,10 +30,12 @@ app = FastAPI(title="OMG Playlist Manager")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Health check endpoint
 @app.get("/")
 async def read_root():
     return {"status": "healthy"}
@@ -34,13 +45,37 @@ async def read_root():
 async def startup_event():
     init_db()
 
+# Auth endpoints
+@app.post("/token", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/users/me", response_model=User)
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
 # Playlist routes
 @app.get("/playlists", response_model=List[Playlist])
-async def get_playlists():
+async def get_playlists(user_id: int = Depends(get_current_user_id)):
     with get_db() as db:
         cursor = db.cursor()
         playlists = []
-        for playlist in cursor.execute("SELECT * FROM playlists ORDER BY created_at").fetchall():
+        # Get only playlists for current user
+        for playlist in cursor.execute(
+            "SELECT * FROM playlists WHERE user_id = ? ORDER BY created_at",
+            (user_id,)
+        ).fetchall():
             channels = cursor.execute("""
                 SELECT * FROM channels 
                 WHERE playlist_id = ? 
@@ -54,16 +89,26 @@ async def get_playlists():
         return playlists
 
 @app.post("/playlists", response_model=Playlist)
-async def create_playlist(playlist: PlaylistCreate):
+async def create_playlist(
+    playlist: PlaylistCreate,
+    user_id: int = Depends(get_current_user_id)
+):
     with get_db() as db:
         cursor = db.cursor()
         cursor.execute(
             """
-            INSERT INTO playlists (name, url, is_custom, public_token)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO playlists 
+            (user_id, name, url, is_custom, public_token, epg_url)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (playlist.name, playlist.url, playlist.is_custom, 
-             str(uuid.uuid4()) if playlist.is_custom else None)
+            (
+                user_id,
+                playlist.name,
+                playlist.url,
+                playlist.is_custom,
+                str(uuid.uuid4()) if playlist.is_custom else None,
+                playlist.epg_url
+            )
         )
         
         new_playlist = cursor.execute(
@@ -74,11 +119,14 @@ async def create_playlist(playlist: PlaylistCreate):
         return dict(new_playlist)
 
 @app.get("/playlists/{playlist_id}", response_model=Playlist)
-async def get_playlist(playlist_id: int):
+async def get_playlist(
+    playlist_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
     with get_db() as db:
         playlist = db.execute(
-            "SELECT * FROM playlists WHERE id = ?",
-            (playlist_id,)
+            "SELECT * FROM playlists WHERE id = ? AND user_id = ?",
+            (playlist_id, user_id)
         ).fetchone()
         
         if not playlist:
@@ -95,13 +143,17 @@ async def get_playlist(playlist_id: int):
         return playlist_dict
 
 @app.put("/playlists/{playlist_id}", response_model=Playlist)
-async def update_playlist(playlist_id: int, playlist: PlaylistUpdate):
+async def update_playlist(
+    playlist_id: int,
+    playlist: PlaylistUpdate,
+    user_id: int = Depends(get_current_user_id)
+):
     with get_db() as db:
         cursor = db.cursor()
         
         existing = cursor.execute(
-            "SELECT * FROM playlists WHERE id = ?",
-            (playlist_id,)
+            "SELECT * FROM playlists WHERE id = ? AND user_id = ?",
+            (playlist_id, user_id)
         ).fetchone()
         
         if not existing:
@@ -116,46 +168,59 @@ async def update_playlist(playlist_id: int, playlist: PlaylistUpdate):
         if playlist.url is not None:
             update_fields.append("url = ?")
             values.append(playlist.url)
+        if playlist.epg_url is not None:
+            update_fields.append("epg_url = ?")
+            values.append(playlist.epg_url)
         
         if update_fields:
-            values.append(playlist_id)
+            values.extend([playlist_id, user_id])
             cursor.execute(
                 f"""
                 UPDATE playlists 
                 SET {', '.join(update_fields)}
-                WHERE id = ?
+                WHERE id = ? AND user_id = ?
                 """,
                 tuple(values)
             )
         
-        return await get_playlist(playlist_id)
+        return await get_playlist(playlist_id, user_id)
 
 @app.delete("/playlists/{playlist_id}")
-async def delete_playlist(playlist_id: int):
+async def delete_playlist(
+    playlist_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
     with get_db() as db:
         cursor = db.cursor()
         
         playlist = cursor.execute(
-            "SELECT * FROM playlists WHERE id = ?",
-            (playlist_id,)
+            "SELECT * FROM playlists WHERE id = ? AND user_id = ?",
+            (playlist_id, user_id)
         ).fetchone()
         
         if not playlist:
             raise HTTPException(status_code=404, detail="Playlist not found")
         
-        cursor.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+        cursor.execute(
+            "DELETE FROM playlists WHERE id = ? AND user_id = ?",
+            (playlist_id, user_id)
+        )
         return {"message": "Playlist deleted"}
 
+# Playlist sync
 @app.post("/playlists/{playlist_id}/sync")
-async def sync_playlist(playlist_id: int):
+async def sync_playlist(
+    playlist_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
     print(f"Starting sync for playlist {playlist_id}")  # Debug log
     
     with get_db() as db:
         cursor = db.cursor()
         
         playlist = cursor.execute(
-            "SELECT * FROM playlists WHERE id = ?",
-            (playlist_id,)
+            "SELECT * FROM playlists WHERE id = ? AND user_id = ?",
+            (playlist_id, user_id)
         ).fetchone()
         
         print(f"Found playlist: {playlist}")  # Debug log
@@ -190,19 +255,22 @@ async def sync_playlist(playlist_id: int):
                             detail=f"Failed to parse M3U content: {str(e)}"
                         )
                     
-                    # Mantieni i tvg_id esistenti
-                    existing_channels = {
-                        ch['url']: ch['tvg_id'] 
-                        for ch in cursor.execute(
-                            "SELECT url, tvg_id FROM channels WHERE playlist_id = ?",
-                            (playlist_id,)
-                        ).fetchall()
-                        if ch['tvg_id']  # Solo se tvg_id non è None
-                    }
-                    
                     try:
                         print("Starting database transaction")  # Debug log
                         cursor.execute("BEGIN TRANSACTION")
+                        
+                        # Mantieni i tvg_id e extra_tags esistenti
+                        existing_channels = {
+                            ch['url']: {
+                                'tvg_id': ch['tvg_id'],
+                                'extra_tags': ch['extra_tags']
+                            }
+                            for ch in cursor.execute(
+                                "SELECT url, tvg_id, extra_tags FROM channels WHERE playlist_id = ?",
+                                (playlist_id,)
+                            ).fetchall()
+                            if ch['tvg_id'] or ch['extra_tags']
+                        }
                         
                         # Clear existing channels
                         cursor.execute(
@@ -214,17 +282,28 @@ async def sync_playlist(playlist_id: int):
                         # Insert new channels
                         for i, channel in enumerate(channels):
                             try:
-                                # Se il canale esisteva già, mantieni il suo tvg_id
-                                tvg_id = existing_channels.get(channel.url, channel.tvg_id)
+                                # Mantieni i dati esistenti se disponibili
+                                existing = existing_channels.get(channel.url, {})
+                                tvg_id = existing.get('tvg_id', channel.tvg_id)
+                                
+                                # Unisci gli extra_tags esistenti con quelli nuovi
+                                extra_tags = channel.extra_tags.copy()
+                                if 'extra_tags' in existing:
+                                    existing_extra = json.loads(existing['extra_tags'])
+                                    extra_tags.update(existing_extra)
                                 
                                 cursor.execute(
                                     """
                                     INSERT INTO channels 
-                                    (playlist_id, name, url, group_title, logo_url, tvg_id, position, extra_tags)
+                                    (playlist_id, name, url, group_title, logo_url, 
+                                     tvg_id, position, extra_tags)
                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                                     """,
-                                    (playlist_id, channel.name, channel.url, channel.group, 
-                                     channel.logo, tvg_id, i+1, json.dumps(channel.extra_tags))
+                                    (
+                                        playlist_id, channel.name, channel.url,
+                                        channel.group, channel.logo, tvg_id,
+                                        i+1, json.dumps(extra_tags)
+                                    )
                                 )
                             except Exception as e:
                                 print(f"Error inserting channel {i}: {str(e)}")  # Debug log
@@ -238,9 +317,9 @@ async def sync_playlist(playlist_id: int):
                             """
                             UPDATE playlists 
                             SET last_sync = CURRENT_TIMESTAMP
-                            WHERE id = ?
+                            WHERE id = ? AND user_id = ?
                             """,
-                            (playlist_id,)
+                            (playlist_id, user_id)
                         )
                         
                         cursor.execute("COMMIT")
@@ -258,19 +337,238 @@ async def sync_playlist(playlist_id: int):
                 "message": "Playlist synchronized successfully",
                 "channels_count": len(channels)
             }
+            
+        except aiohttp.ClientError as e:
+            print(f"HTTP error: {str(e)}")  # Debug log
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to fetch playlist: {str(e)}"
+            )
+        except Exception as e:
+            print(f"Unexpected error: {str(e)}")  # Debug log
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error syncing playlist: {str(e)}"
+            )
 
-@app.post("/playlists/{playlist_id}/generate-token")
-async def generate_public_token(playlist_id: int):
+# Channel management
+@app.post("/playlists/{playlist_id}/channels", response_model=Channel)
+async def add_channel(
+    playlist_id: int,
+    channel: ChannelCreate,
+    user_id: int = Depends(get_current_user_id)
+):
     with get_db() as db:
         cursor = db.cursor()
-        token = str(uuid.uuid4())
         
+        # Verifica che la playlist appartenga all'utente
+        playlist = cursor.execute(
+            "SELECT * FROM playlists WHERE id = ? AND user_id = ?",
+            (playlist_id, user_id)
+        ).fetchone()
+        
+        if not playlist:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+            
+        try:
+            # Trova la posizione massima attuale
+            max_pos = cursor.execute(
+                """
+                SELECT MAX(position) as max_pos 
+                FROM channels 
+                WHERE playlist_id = ?
+                """,
+                (playlist_id,)
+            ).fetchone()
+            
+            next_pos = (max_pos['max_pos'] or 0) + 1 if max_pos else 1
+            
+            cursor.execute(
+                """
+                INSERT INTO channels 
+                (playlist_id, name, url, group_title, logo_url, position, tvg_id, extra_tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    playlist_id, channel.name, channel.url,
+                    channel.group_title, channel.logo_url, next_pos,
+                    channel.tvg_id, json.dumps(channel.extra_tags or {})
+                )
+            )
+            
+            new_channel = cursor.execute(
+                "SELECT * FROM channels WHERE id = ?",
+                (cursor.lastrowid,)
+            ).fetchone()
+            
+            return dict(new_channel)
+            
+        except Exception as e:
+            print(f"Error adding channel: {str(e)}")  # Debug log
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to add channel: {str(e)}"
+            )
+
+@app.put("/channels/{channel_id}", response_model=Channel)
+async def update_channel(
+    channel_id: int,
+    channel: ChannelUpdate,
+    user_id: int = Depends(get_current_user_id)
+):
+    with get_db() as db:
+        cursor = db.cursor()
+        
+        # Verifica che il canale appartenga a una playlist dell'utente
+        channel_data = cursor.execute("""
+            SELECT c.* 
+            FROM channels c
+            JOIN playlists p ON c.playlist_id = p.id
+            WHERE c.id = ? AND p.user_id = ?
+        """, (channel_id, user_id)).fetchone()
+        
+        if not channel_data:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        
+        update_fields = []
+        values = []
+        
+        if channel.name is not None:
+            update_fields.append("name = ?")
+            values.append(channel.name)
+        if channel.url is not None:
+            update_fields.append("url = ?")
+            values.append(channel.url)
+        if channel.group_title is not None:
+            update_fields.append("group_title = ?")
+            values.append(channel.group_title)
+        if channel.logo_url is not None:
+            update_fields.append("logo_url = ?")
+            values.append(channel.logo_url)
+        if channel.tvg_id is not None:
+            update_fields.append("tvg_id = ?")
+            values.append(channel.tvg_id)
+        if channel.extra_tags is not None:
+            update_fields.append("extra_tags = ?")
+            values.append(json.dumps(channel.extra_tags))
+        
+        if update_fields:
+            values.append(channel_id)
+            cursor.execute(
+                f"""
+                UPDATE channels 
+                SET {', '.join(update_fields)}
+                WHERE id = ?
+                """,
+                tuple(values)
+            )
+            
+            updated_channel = cursor.execute(
+                "SELECT * FROM channels WHERE id = ?",
+                (channel_id,)
+            ).fetchone()
+            
+            return dict(updated_channel)
+        
+        return dict(channel_data)
+
+@app.delete("/channels/{channel_id}")
+async def delete_channel(
+    channel_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
+    with get_db() as db:
+        cursor = db.cursor()
+        
+        # Verifica che il canale appartenga a una playlist dell'utente
+        channel = cursor.execute("""
+            SELECT c.* 
+            FROM channels c
+            JOIN playlists p ON c.playlist_id = p.id
+            WHERE c.id = ? AND p.user_id = ?
+        """, (channel_id, user_id)).fetchone()
+        
+        if not channel:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        
+        cursor.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+        return {"message": "Channel deleted"}
+
+# Channel ordering
+@app.put("/playlists/{playlist_id}/channels/reorder")
+async def reorder_channels(
+    playlist_id: int,
+    channel_orders: List[ChannelOrder],
+    user_id: int = Depends(get_current_user_id)
+):
+    with get_db() as db:
+        cursor = db.cursor()
+        
+        playlist = cursor.execute(
+            "SELECT * FROM playlists WHERE id = ? AND user_id = ?",
+            (playlist_id, user_id)
+        ).fetchone()
+        
+        if not playlist:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        
+        try:
+            cursor.execute("BEGIN TRANSACTION")
+            
+            for order in channel_orders:
+                if playlist['is_custom']:
+                    cursor.execute("""
+                        UPDATE custom_playlist_channels 
+                        SET position = ? 
+                        WHERE playlist_id = ? AND channel_id = ?
+                    """, (order.position, playlist_id, order.id))
+                else:
+                    cursor.execute("""
+                        UPDATE channels 
+                        SET position = ? 
+                        WHERE id = ? AND playlist_id = ?
+                    """, (order.position, order.id, playlist_id))
+            
+            cursor.execute("COMMIT")
+            return {"message": "Channels reordered successfully"}
+            
+        except Exception as e:
+            cursor.execute("ROLLBACK")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error reordering channels: {str(e)}"
+            )
+
+# Public playlist management
+@app.post("/playlists/{playlist_id}/generate-token")
+async def generate_public_token(
+    playlist_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
+    with get_db() as db:
+        cursor = db.cursor()
+        
+        # Verifica che la playlist appartenga all'utente
+        playlist = cursor.execute(
+            "SELECT * FROM playlists WHERE id = ? AND user_id = ?",
+            (playlist_id, user_id)
+        ).fetchone()
+        
+        if not playlist:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        
+        token = str(uuid.uuid4())
         cursor.execute(
             "UPDATE playlists SET public_token = ? WHERE id = ?",
             (token, playlist_id)
         )
         
-        return {"token": token, "public_url": f"/public/playlist/{token}/m3u"}
+        base_url = "/public/playlist"
+        return {
+            "token": token,
+            "public_url": f"{base_url}/{token}/m3u",
+            "epg_url": playlist['epg_url']
+        }
 
 @app.get("/public/playlist/{token}/m3u")
 async def get_public_playlist(token: str):
@@ -293,7 +591,7 @@ async def get_public_playlist(token: str):
                 FROM channels c
                 JOIN custom_playlist_channels cpc ON c.id = cpc.channel_id
                 WHERE cpc.playlist_id = ?
-                ORDER BY cpc.position
+                ORDER BY cpc.position, c.name
             """, (playlist['id'],)).fetchall()
         else:
             # Per playlist normali
@@ -305,7 +603,7 @@ async def get_public_playlist(token: str):
         
         # Converti in oggetti M3UChannel
         for row in rows:
-            extra_tags = row['extra_tags'] if row['extra_tags'] else {}
+            extra_tags = json.loads(row['extra_tags']) if row['extra_tags'] else {}
             channels.append(M3UChannel(
                 name=row['name'],
                 url=row['url'],
@@ -318,73 +616,31 @@ async def get_public_playlist(token: str):
         # Genera il contenuto M3U
         content = generate_m3u(channels, playlist.get('epg_url'))
         
-        return PlainTextResponse(content)
+        return PlainTextResponse(
+            content,
+            media_type="application/x-mpegurl",
+            headers={
+                "Content-Disposition": f'attachment; filename="{playlist["name"]}.m3u"'
+            }
+        )
 
-@app.post("/playlists/{playlist_id}/channels")
-async def add_channel(playlist_id: int, channel: ChannelCreate):
-    with get_db() as db:
-        cursor = db.cursor()
-        
-        # Verifica che la playlist esista
-        playlist = cursor.execute(
-            "SELECT * FROM playlists WHERE id = ?",
-            (playlist_id,)
-        ).fetchone()
-        
-        if not playlist:
-            raise HTTPException(status_code=404, detail="Playlist not found")
-            
-        try:
-            # Trova la posizione massima attuale
-            max_pos = cursor.execute(
-                """
-                SELECT MAX(position) as max_pos 
-                FROM channels 
-                WHERE playlist_id = ?
-                """,
-                (playlist_id,)
-            ).fetchone()
-            
-            next_pos = (max_pos['max_pos'] or 0) + 1 if max_pos else 1
-            
-            # Inserisci il nuovo canale
-            cursor.execute(
-                """
-                INSERT INTO channels 
-                (playlist_id, name, url, group_title, logo_url, position, tvg_id, extra_tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (playlist_id, channel.name, channel.url, 
-                 channel.group_title, channel.logo_url, next_pos,
-                 channel.tvg_id, channel.extra_tags)
-            )
-            
-            # Recupera il canale appena inserito
-            new_channel = cursor.execute(
-                "SELECT * FROM channels WHERE id = ?",
-                (cursor.lastrowid,)
-            ).fetchone()
-            
-            return dict(new_channel)
-            
-        except Exception as e:
-            print(f"Error adding channel: {str(e)}")  # Debug log
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to add channel: {str(e)}"
-            )
-
-@app.put("/channels/{channel_id}/tvg-id")
-
+# Custom playlist channels management
 @app.post("/playlists/{playlist_id}/add-channel/{channel_id}")
-async def add_channel_to_playlist(playlist_id: int, channel_id: int):
+async def add_channel_to_custom_playlist(
+    playlist_id: int,
+    channel_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
     with get_db() as db:
         cursor = db.cursor()
         
-        # Verifica che sia una playlist custom
+        # Verifica che sia una playlist custom dell'utente
         playlist = cursor.execute(
-            "SELECT * FROM playlists WHERE id = ? AND is_custom = 1",
-            (playlist_id,)
+            """
+            SELECT * FROM playlists 
+            WHERE id = ? AND user_id = ? AND is_custom = 1
+            """,
+            (playlist_id, user_id)
         ).fetchone()
         
         if not playlist:
@@ -394,10 +650,12 @@ async def add_channel_to_playlist(playlist_id: int, channel_id: int):
             )
         
         # Verifica che il canale esista
-        channel = cursor.execute(
-            "SELECT * FROM channels WHERE id = ?",
-            (channel_id,)
-        ).fetchone()
+        channel = cursor.execute("""
+            SELECT c.* 
+            FROM channels c
+            JOIN playlists p ON c.playlist_id = p.id
+            WHERE c.id = ? AND p.user_id = ?
+        """, (channel_id, user_id)).fetchone()
         
         if not channel:
             raise HTTPException(status_code=404, detail="Channel not found")
@@ -415,7 +673,6 @@ async def add_channel_to_playlist(playlist_id: int, channel_id: int):
             
             next_pos = (max_pos['max_pos'] or 0) + 1
             
-            # Aggiungi il canale
             cursor.execute(
                 """
                 INSERT INTO custom_playlist_channels 
@@ -426,96 +683,29 @@ async def add_channel_to_playlist(playlist_id: int, channel_id: int):
             )
             
             return {"message": "Channel added to playlist"}
+            
         except sqlite3.IntegrityError:
             raise HTTPException(
                 status_code=400,
                 detail="Channel already in playlist"
             )
 
-@app.put("/playlists/{playlist_id}/channels/reorder")
-async def reorder_channels(playlist_id: int, channel_orders: List[Dict[str, int]]):
+@app.delete("/playlists/{playlist_id}/channels/{channel_id}")
+async def remove_channel_from_custom_playlist(
+    playlist_id: int,
+    channel_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
     with get_db() as db:
         cursor = db.cursor()
         
+        # Verifica che sia una playlist custom dell'utente
         playlist = cursor.execute(
-            "SELECT * FROM playlists WHERE id = ?",
-            (playlist_id,)
-        ).fetchone()
-        
-        if not playlist:
-            raise HTTPException(status_code=404, detail="Playlist not found")
-        
-        try:
-            for order in channel_orders:
-                channel_id = order['id']
-                position = order['position']
-                
-                if playlist['is_custom']:
-                    cursor.execute("""
-                        UPDATE custom_playlist_channels 
-                        SET position = ? 
-                        WHERE playlist_id = ? AND channel_id = ?
-                    """, (position, playlist_id, channel_id))
-                else:
-                    cursor.execute("""
-                        UPDATE channels 
-                        SET position = ? 
-                        WHERE id = ? AND playlist_id = ?
-                    """, (position, channel_id, playlist_id))
-            
-            return {"message": "Channels reordered successfully"}
-        except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Error reordering channels: {str(e)}"
-            )
-
-@app.put("/playlists/{playlist_id}/epg")
-async def update_playlist_epg(playlist_id: int, epg_url: str):
-    with get_db() as db:
-        cursor = db.cursor()
-        
-        playlist = cursor.execute(
-            "SELECT * FROM playlists WHERE id = ?",
-            (playlist_id,)
-        ).fetchone()
-        
-        if not playlist:
-            raise HTTPException(status_code=404, detail="Playlist not found")
-        
-        cursor.execute(
-            "UPDATE playlists SET epg_url = ? WHERE id = ?",
-            (epg_url, playlist_id)
-        )
-        
-        return {"message": "EPG URL updated successfully"}
-
-@app.put("/channels/{channel_id}/tvg-id")
-async def update_channel_tvg_id(channel_id: int, tvg_id: str):
-    with get_db() as db:
-        cursor = db.cursor()
-        
-        channel = cursor.execute(
-            "SELECT * FROM channels WHERE id = ?",
-            (channel_id,)
-        ).fetchone()
-        
-        if not channel:
-            raise HTTPException(status_code=404, detail="Channel not found")
-        
-        cursor.execute(
-            "UPDATE channels SET tvg_id = ? WHERE id = ?",
-            (tvg_id, channel_id)
-        )
-        
-        return {"message": "TVG-ID updated successfully"}
-
-@app.get("/playlists/{playlist_id}/channels-available")
-async def get_available_channels(playlist_id: int):
-    with get_db() as db:
-        playlist = db.execute(
-            "SELECT * FROM playlists WHERE id = ? AND is_custom = 1",
-            (playlist_id,)
+            """
+            SELECT * FROM playlists 
+            WHERE id = ? AND user_id = ? AND is_custom = 1
+            """,
+            (playlist_id, user_id)
         ).fetchone()
         
         if not playlist:
@@ -524,17 +714,49 @@ async def get_available_channels(playlist_id: int):
                 detail="Custom playlist not found"
             )
         
+        cursor.execute(
+            """
+            DELETE FROM custom_playlist_channels 
+            WHERE playlist_id = ? AND channel_id = ?
+            """,
+            (playlist_id, channel_id)
+        )
+        
+        return {"message": "Channel removed from playlist"}
+
+@app.get("/playlists/{playlist_id}/channels-available")
+async def get_available_channels(
+    playlist_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
+    with get_db() as db:
+        # Verifica che sia una playlist custom dell'utente
+        playlist = db.execute(
+            """
+            SELECT * FROM playlists 
+            WHERE id = ? AND user_id = ? AND is_custom = 1
+            """,
+            (playlist_id, user_id)
+        ).fetchone()
+        
+        if not playlist:
+            raise HTTPException(
+                status_code=404,
+                detail="Custom playlist not found"
+            )
+        
+        # Prendi tutti i canali che non sono già nella playlist custom
         channels = db.execute("""
-            SELECT c.*, p.name as playlist_name 
+            SELECT c.*, p.name as source_playlist_name 
             FROM channels c
             JOIN playlists p ON c.playlist_id = p.id
-            WHERE c.id NOT IN (
+            WHERE p.user_id = ? AND c.id NOT IN (
                 SELECT channel_id 
                 FROM custom_playlist_channels 
                 WHERE playlist_id = ?
             )
             ORDER BY p.name, c.position, c.name
-        """, (playlist_id,)).fetchall()
+        """, (user_id, playlist_id)).fetchall()
         
         return channels
 
