@@ -4,6 +4,7 @@ import json
 from typing import Optional
 from pathlib import Path
 from contextlib import contextmanager
+from passlib.hash import bcrypt
 
 DATABASE_PATH = Path("data/playlists.db")
 
@@ -46,17 +47,29 @@ def init_db():
         # Enable WAL mode for better concurrency
         cursor.execute('PRAGMA journal_mode=WAL')
         
+        # Create users table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # Create playlists table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS playlists (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 url TEXT,
                 is_custom BOOLEAN DEFAULT FALSE,
                 public_token TEXT UNIQUE,
                 epg_url TEXT,
                 last_sync TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id)
             )
         """)
 
@@ -89,21 +102,27 @@ def init_db():
             )
         """)
 
-        # Add missing columns if needed
-        try:
-            cursor.execute("ALTER TABLE channels ADD COLUMN position INTEGER;")
-        except sqlite3.OperationalError:
-            pass
+        # Insert default admin user if it doesn't exist
+        cursor.execute("SELECT * FROM users WHERE username = ?", ("admin",))
+        if not cursor.fetchone():
+            password_hash = bcrypt.hash("admin")
+            cursor.execute(
+                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                ("admin", password_hash)
+            )
+
+def verify_password(username: str, password: str) -> bool:
+    """Verify user password"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        user = cursor.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (username,)
+        ).fetchone()
         
-        try:
-            cursor.execute("ALTER TABLE channels ADD COLUMN tvg_id TEXT;")
-        except sqlite3.OperationalError:
-            pass
-        
-        try:
-            cursor.execute("ALTER TABLE playlists ADD COLUMN epg_url TEXT;")
-        except sqlite3.OperationalError:
-            pass
+        if user and bcrypt.verify(password, user['password_hash']):
+            return True
+        return False
 
 if __name__ == "__main__":
     init_db()
