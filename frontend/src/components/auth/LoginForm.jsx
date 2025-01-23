@@ -1,31 +1,93 @@
 import React from 'react';
-import { cn } from '@/lib/utils';
+import { useNavigate } from 'react-router-dom';
+import { useStore } from '@/store';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { Card, CardHeader, CardContent, CardTitle } from '@/components/ui/Card';
+import { LogIn } from 'lucide-react';
 
-export function PageHeader({
-  title,
-  description,
-  children,
-  className
-}) {
+export function LoginForm() {
+  const navigate = useNavigate();
+  const { login, loading, error, clearError } = useStore(state => ({
+    login: state.auth.login,
+    loading: state.auth.loading,
+    error: state.auth.error,
+    clearError: state.auth.clearError
+  }));
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    clearError();
+
+    const formData = new FormData(e.target);
+    const username = formData.get('username');
+    const password = formData.get('password');
+
+    const success = await login(username, password);
+    if (success) {
+      navigate('/playlists');
+    }
+  };
+
   return (
-    <div className={cn('pb-6', className)}>
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            {title}
-          </h1>
-          {description && (
-            <p className="mt-2 text-sm text-gray-500">
-              {description}
-            </p>
+    <Card className="w-full max-w-md">
+      <CardHeader>
+        <CardTitle className="flex items-center justify-center space-x-2">
+          <LogIn className="h-6 w-6" />
+          <span>Login</span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {error && (
+            <div className="rounded-md bg-red-50 p-4 text-sm text-red-500">
+              {error}
+            </div>
           )}
-        </div>
-        {children && (
-          <div className="flex items-center gap-4">
-            {children}
+
+          <div className="space-y-2">
+            <label 
+              htmlFor="username"
+              className="text-sm font-medium text-gray-700"
+            >
+              Username
+            </label>
+            <Input
+              id="username"
+              name="username"
+              type="text"
+              required
+              autoComplete="username"
+              autoFocus
+            />
           </div>
-        )}
-      </div>
-    </div>
+
+          <div className="space-y-2">
+            <label 
+              htmlFor="password"
+              className="text-sm font-medium text-gray-700"
+            >
+              Password
+            </label>
+            <Input
+              id="password"
+              name="password"
+              type="password"
+              required
+              autoComplete="current-password"
+            />
+          </div>
+
+          <Button
+            type="submit"
+            className="w-full"
+            loading={loading}
+            disabled={loading}
+          >
+            {loading ? 'Logging in...' : 'Login'}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   );
 }
