@@ -1,43 +1,43 @@
-import React, { useState, useEffect } from 'react';
-import { getPlaylists } from '../lib/api';
-import PlaylistList from '../components/PlaylistList';
+import React, { useEffect } from 'react';
+import { Link } from 'react-router-dom';
+import { useStore } from '@/store';
+import { PageHeader } from '@/components/layout';
+import { PlaylistList } from '@/components/playlist';
+import { Button } from '@/components/ui/Button';
+import { Plus } from 'lucide-react';
 
-export default function Home() {
-  const [playlists, setPlaylists] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  const loadPlaylists = async () => {
-    try {
-      setLoading(true);
-      const data = await getPlaylists();
-      setPlaylists(data);
-      setError(null);
-    } catch (err) {
-      setError('Failed to load playlists');
-      console.error('Error loading playlists:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+export function HomePage() {
+  const { playlists, loading, error, loadPlaylists } = useStore(state => ({
+    playlists: state.playlists.items,
+    loading: state.playlists.loading,
+    error: state.playlists.error,
+    loadPlaylists: state.playlists.loadPlaylists
+  }));
 
   useEffect(() => {
     loadPlaylists();
-  }, []);
+  }, [loadPlaylists]);
 
   if (loading) {
     return (
-      <div className="text-center py-12">
-        <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-blue-500 border-t-transparent"></div>
+      <div className="flex h-96 items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-blue-500 border-t-transparent"></div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="text-center py-12">
-        <div className="bg-red-50 text-red-800 p-4 rounded-md inline-block">
-          {error}
+      <div className="flex h-96 items-center justify-center">
+        <div className="text-center">
+          <p className="text-red-500">{error}</p>
+          <Button 
+            variant="ghost" 
+            onClick={loadPlaylists}
+            className="mt-4"
+          >
+            Try Again
+          </Button>
         </div>
       </div>
     );
@@ -45,27 +45,19 @@ export default function Home() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-semibold text-gray-900">
-          Your Playlists
-        </h1>
-      </div>
+      <PageHeader
+        title="Your Playlists"
+        description={`${playlists.length} playlist${playlists.length === 1 ? '' : 's'}`}
+      >
+        <Link to="/playlists/add">
+          <Button>
+            <Plus className="mr-2 h-4 w-4" />
+            Add Playlist
+          </Button>
+        </Link>
+      </PageHeader>
 
-      {playlists.length === 0 ? (
-        <div className="text-center py-12 bg-white rounded-lg shadow">
-          <h3 className="text-lg font-medium text-gray-900">
-            No playlists yet
-          </h3>
-          <p className="mt-2 text-sm text-gray-500">
-            Get started by adding your first playlist
-          </p>
-        </div>
-      ) : (
-        <PlaylistList 
-          playlists={playlists} 
-          onUpdate={loadPlaylists} 
-        />
-      )}
+      <PlaylistList playlists={playlists} />
     </div>
   );
 }
