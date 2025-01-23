@@ -1,111 +1,120 @@
-const API_URL = 'http://localhost:8000';
+import axios from 'axios';
+import { getAuthToken } from './auth';
 
-export async function getPlaylists() {
-    const response = await fetch(`${API_URL}/playlists`);
-    if (!response.ok) {
-        throw new Error('Failed to fetch playlists');
-    }
-    return response.json();
-}
+// Create axios instance with default config
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
-export async function getPlaylist(id) {
-    const response = await fetch(`${API_URL}/playlists/${id}`);
-    if (!response.ok) {
-        throw new Error('Failed to fetch playlist');
-    }
-    return response.json();
-}
+// Add auth token to requests
+api.interceptors.request.use((config) => {
+  const token = getAuthToken();
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
 
-export async function createPlaylist(data) {
-    const response = await fetch(`${API_URL}/playlists`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(data),
-    });
-    if (!response.ok) {
-        throw new Error('Failed to create playlist');
-    }
-    return response.json();
-}
+// API endpoints
+export const auth = {
+  login: async (username, password) => {
+    const formData = new FormData();
+    formData.append('username', username);
+    formData.append('password', password);
+    const { data } = await api.post('/token', formData);
+    return data;
+  },
+  getMe: async () => {
+    const { data } = await api.get('/users/me');
+    return data;
+  },
+};
 
-export async function updatePlaylist(id, data) {
-    const response = await fetch(`${API_URL}/playlists/${id}`, {
-        method: 'PUT',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(data),
-    });
-    if (!response.ok) {
-        throw new Error('Failed to update playlist');
-    }
-    return response.json();
-}
+export const playlists = {
+  getAll: async () => {
+    const { data } = await api.get('/playlists');
+    return data;
+  },
+  
+  getOne: async (id) => {
+    const { data } = await api.get(`/playlists/${id}`);
+    return data;
+  },
+  
+  create: async (playlist) => {
+    const { data } = await api.post('/playlists', playlist);
+    return data;
+  },
+  
+  update: async (id, playlist) => {
+    const { data } = await api.put(`/playlists/${id}`, playlist);
+    return data;
+  },
+  
+  delete: async (id) => {
+    const { data } = await api.delete(`/playlists/${id}`);
+    return data;
+  },
+  
+  sync: async (id) => {
+    const { data } = await api.post(`/playlists/${id}/sync`);
+    return data;
+  },
+  
+  generateToken: async (id) => {
+    const { data } = await api.post(`/playlists/${id}/generate-token`);
+    return data;
+  },
+  
+  addChannel: async (playlistId, channel) => {
+    const { data } = await api.post(`/playlists/${playlistId}/channels`, channel);
+    return data;
+  },
+  
+  updateChannel: async (channelId, channel) => {
+    const { data } = await api.put(`/channels/${channelId}`, channel);
+    return data;
+  },
+  
+  deleteChannel: async (channelId) => {
+    const { data } = await api.delete(`/channels/${channelId}`);
+    return data;
+  },
+  
+  reorderChannels: async (playlistId, channelOrders) => {
+    const { data } = await api.put(
+      `/playlists/${playlistId}/channels/reorder`,
+      channelOrders
+    );
+    return data;
+  },
+  
+  updateEpg: async (playlistId, epgUrl) => {
+    const { data } = await api.put(`/playlists/${playlistId}/epg`, { epg_url: epgUrl });
+    return data;
+  },
+  
+  getAvailableChannels: async (playlistId) => {
+    const { data } = await api.get(`/playlists/${playlistId}/channels-available`);
+    return data;
+  },
+  
+  addChannelToCustom: async (playlistId, channelId) => {
+    const { data } = await api.post(
+      `/playlists/${playlistId}/add-channel/${channelId}`
+    );
+    return data;
+  },
+  
+  removeChannelFromCustom: async (playlistId, channelId) => {
+    const { data } = await api.delete(
+      `/playlists/${playlistId}/channels/${channelId}`
+    );
+    return data;
+  },
+};
 
-export async function deletePlaylist(id) {
-    const response = await fetch(`${API_URL}/playlists/${id}`, {
-        method: 'DELETE',
-    });
-    if (!response.ok) {
-        throw new Error('Failed to delete playlist');
-    }
-    return response.json();
-}
-
-export async function syncPlaylist(id) {
-    const response = await fetch(`${API_URL}/playlists/${id}/sync`, {
-        method: 'POST',
-    });
-    if (!response.ok) {
-        throw new Error('Failed to sync playlist');
-    }
-    return response.json();
-}
-
-export async function addChannel(playlistId, channelData) {
-    const response = await fetch(`${API_URL}/playlists/${playlistId}/channels`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(channelData),
-    });
-    if (!response.ok) {
-        throw new Error('Failed to add channel');
-    }
-    return response.json();
-}
-
-export async function updateChannel(channelId, channelData) {
-    const response = await fetch(`${API_URL}/channels/${channelId}`, {
-        method: 'PUT',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(channelData),
-    });
-    if (!response.ok) {
-        throw new Error('Failed to update channel');
-    }
-    return response.json();
-}
-
-export async function deleteChannel(channelId) {
-    const response = await fetch(`${API_URL}/channels/${channelId}`, {
-        method: 'DELETE',
-    });
-    if (!response.ok) {
-        throw new Error('Failed to delete channel');
-    }
-    return response.json();
-}
-
-export async function getPlaylistM3U(id) {
-    const response = await fetch(`${API_URL}/playlists/${id}/m3u`);
-    if (!response.ok) {
-        throw new Error('Failed to fetch M3U');
-    }
-    return response.text();
-}
+export default api;
